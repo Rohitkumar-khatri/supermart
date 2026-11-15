@@ -1,0 +1,828 @@
+/*
+ * Supermarket Management System
+ * Console program in C
+ *
+ * Uses loops, if/else and switch, arrays, pointers and
+ * dynamic memory (malloc, realloc, free).
+ *
+ * Data is saved in text files so nothing is lost when the program closes:
+ *   products.txt   id|name|price|quantity
+ *   customers.txt  loyaltyID|name|totalSpent
+ *   sales.txt      date|billNo|loyaltyID|subtotal|discount|total
+ *   receipts.txt   copy of every receipt we print
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+
+#define LOW_STOCK_LIMIT 10
+#define DISCOUNT_RATE 0.05f      // loyalty customers get 5% off
+#define PRODUCT_FILE "products.txt"
+#define CUSTOMER_FILE "customers.txt"
+#define SALES_FILE "sales.txt"
+#define RECEIPT_FILE "receipts.txt"
+
+struct Product {
+    int id;
+    char name[50];
+    float price;
+    int quantity;
+};
+
+struct Customer {
+    int id;
+    char name[50];
+    float totalSpent;
+};
+
+// reading input
+int readInt(const char *prompt);
+float readFloat(const char *prompt);
+void readString(const char *prompt, char *buf, int size);
+
+// files
+void loadProducts(struct Product **list, int *count);
+void saveProducts(struct Product *list, int count);
+void loadCustomers(struct Customer **list, int *count);
+void saveCustomers(struct Customer *list, int count);
+
+// products
+struct Product *findProduct(struct Product *list, int count, int id);
+void addProduct(struct Product **list, int *count);
+void displayProducts(struct Product *list, int count);
+void searchProduct(struct Product *list, int count);
+void updateProduct(struct Product *list, int count);
+void deleteProduct(struct Product *list, int *count);
+void lowStockAlert(struct Product *list, int count);
+
+// customers, billing and sales
+struct Customer *findCustomer(struct Customer *list, int count, int id);
+void addCustomer(struct Customer **list, int *count);
+void displayCustomers(struct Customer *list, int count);
+void billing(struct Product *products, int pcount,
+             struct Customer *customers, int ccount);
+void salesSummary(void);
+
+
+int main(void)
+{
+    struct Product *products = NULL;
+    struct Customer *customers = NULL;
+    int pcount = 0, ccount = 0;
+    int choice;
+
+    loadProducts(&products, &pcount);
+    loadCustomers(&customers, &ccount);
+
+    printf("\n=========================================\n");
+    printf("     SUPER MARKET MANAGEMENT SYSTEM\n");
+    printf("=========================================\n");
+
+    lowStockAlert(products, pcount);   // check stock as soon as the program opens
+
+    do {
+        printf("\n================= MAIN MENU =================\n");
+        printf(" 1. Add Product\n");
+        printf(" 2. Display All Products\n");
+        printf(" 3. Search Product\n");
+        printf(" 4. Update Product (price / restock)\n");
+        printf(" 5. Delete Product\n");
+        printf(" 6. Low Stock Report\n");
+        printf(" 7. Billing / Customer Checkout\n");
+        printf(" 8. Register Loyalty Customer\n");
+        printf(" 9. View Loyalty Customers\n");
+        printf("10. Daily Sales Revenue Summary\n");
+        printf(" 0. Exit\n");
+        printf("=============================================\n");
+
+        choice = readInt("Enter your choice: ");
+
+        switch (choice) {
+        case 1: addProduct(&products, &pcount); break;
+        case 2: displayProducts(products, pcount); break;
+        case 3: searchProduct(products, pcount); break;
+        case 4: updateProduct(products, pcount); break;
+        case 5: deleteProduct(products, &pcount); break;
+        case 6: lowStockAlert(products, pcount); break;
+        case 7:
+            billing(products, pcount, customers, ccount);
+            // billing changes totalSpent in the file, so load customers again
+            free(customers);
+            customers = NULL;
+            ccount = 0;
+            loadCustomers(&customers, &ccount);
+            break;
+        case 8: addCustomer(&customers, &ccount); break;
+        case 9: displayCustomers(customers, ccount); break;
+        case 10: salesSummary(); break;
+        case 0: printf("Exiting... Thank you!\n"); break;
+        default: printf("Invalid choice! Please try again.\n");
+        }
+    } while (choice != 0);
+
+    free(products);
+    free(customers);
+    return 0;
+}
+
+
+/* ---------- reading input ---------- */
+
+void readString(const char *prompt, char *buf, int size)
+{
+    char *p;
+
+    printf("%s", prompt);
+    if (fgets(buf, size, stdin) == NULL) {
+        buf[0] = '\0';
+        return;
+    }
+    buf[strcspn(buf, "\n")] = '\0';
+
+    // we use '|' to separate fields in the files, so don't allow it in names
+    for (p = buf; *p != '\0'; p++)
+        if (*p == '|')
+            *p = ' ';
+}
+
+int readInt(const char *prompt)
+{
+    char line[64];
+    char *end;
+    long value;
+
+    while (1) {
+        printf("%s", prompt);
+        if (fgets(line, sizeof(line), stdin) == NULL)
+            return 0;
+        value = strtol(line, &end, 10);
+        if (end != line && (*end == '\n' || *end == '\0'))
+            return (int)value;
+        printf("Invalid number, try again.\n");
+    }
+}
+
+float readFloat(const char *prompt)
+{
+    char line[64];
+    char *end;
+    float value;
+
+    while (1) {
+        printf("%s", prompt);
+        if (fgets(line, sizeof(line), stdin) == NULL)
+            return 0;
+        value = strtof(line, &end);
+        if (end != line && (*end == '\n' || *end == '\0'))
+            return value;
+        printf("Invalid number, try again.\n");
+    }
+}
+
+
+/* ---------- files ---------- */
+
+void loadProducts(struct Product **list, int *count)
+{
+    FILE *fp = fopen(PRODUCT_FILE, "r");
+    char line[200];
+    struct Product temp, *bigger;
+
+    *list = NULL;
+    *count = 0;
+    if (fp == NULL)
+        return;   // file isn't there on the first run, that's fine
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|%49[^|]|%f|%d",
+                   &temp.id, temp.name, &temp.price, &temp.quantity) == 4) {
+            bigger = (struct Product *)realloc(*list,
+                         (*count + 1) * sizeof(struct Product));
+            if (bigger == NULL) {
+                printf("Memory error while loading products!\n");
+                break;
+            }
+            *list = bigger;
+            (*list)[*count] = temp;
+            (*count)++;
+        }
+    }
+    fclose(fp);
+}
+
+void saveProducts(struct Product *list, int count)
+{
+    FILE *fp = fopen(PRODUCT_FILE, "w");
+    int i;
+
+    if (fp == NULL) {
+        printf("Error: cannot write %s\n", PRODUCT_FILE);
+        return;
+    }
+    for (i = 0; i < count; i++)
+        fprintf(fp, "%d|%s|%.2f|%d\n",
+                list[i].id, list[i].name, list[i].price, list[i].quantity);
+    fclose(fp);
+}
+
+void loadCustomers(struct Customer **list, int *count)
+{
+    FILE *fp = fopen(CUSTOMER_FILE, "r");
+    char line[200];
+    struct Customer temp, *bigger;
+
+    *list = NULL;
+    *count = 0;
+    if (fp == NULL)
+        return;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|%49[^|]|%f",
+                   &temp.id, temp.name, &temp.totalSpent) == 3) {
+            bigger = (struct Customer *)realloc(*list,
+                         (*count + 1) * sizeof(struct Customer));
+            if (bigger == NULL) {
+                printf("Memory error while loading customers!\n");
+                break;
+            }
+            *list = bigger;
+            (*list)[*count] = temp;
+            (*count)++;
+        }
+    }
+    fclose(fp);
+}
+
+void saveCustomers(struct Customer *list, int count)
+{
+    FILE *fp = fopen(CUSTOMER_FILE, "w");
+    int i;
+
+    if (fp == NULL) {
+        printf("Error: cannot write %s\n", CUSTOMER_FILE);
+        return;
+    }
+    for (i = 0; i < count; i++)
+        fprintf(fp, "%d|%s|%.2f\n",
+                list[i].id, list[i].name, list[i].totalSpent);
+    fclose(fp);
+}
+
+
+/* ---------- products ---------- */
+
+// goes through the array with a pointer and returns the matching product
+struct Product *findProduct(struct Product *list, int count, int id)
+{
+    struct Product *p;
+
+    for (p = list; p < list + count; p++)
+        if (p->id == id)
+            return p;
+    return NULL;
+}
+
+void addProduct(struct Product **list, int *count)
+{
+    struct Product p, *bigger;
+
+    p.id = readInt("Enter Product ID: ");
+    if (p.id <= 0) {
+        printf("ID must be a positive number.\n");
+        return;
+    }
+    if (findProduct(*list, *count, p.id) != NULL) {
+        printf("A product with ID %d already exists!\n", p.id);
+        return;
+    }
+
+    readString("Enter Product Name: ", p.name, sizeof(p.name));
+    if (strlen(p.name) == 0) {
+        printf("Name cannot be empty.\n");
+        return;
+    }
+
+    p.price = readFloat("Enter Price: ");
+    p.quantity = readInt("Enter Quantity: ");
+    if (p.price < 0 || p.quantity < 0) {
+        printf("Price and quantity cannot be negative.\n");
+        return;
+    }
+
+    bigger = (struct Product *)realloc(*list,
+                 (*count + 1) * sizeof(struct Product));
+    if (bigger == NULL) {
+        printf("Not enough memory!\n");
+        return;
+    }
+    *list = bigger;
+    (*list)[*count] = p;
+    (*count)++;
+
+    saveProducts(*list, *count);
+    printf("Product added successfully!\n");
+}
+
+void displayProducts(struct Product *list, int count)
+{
+    int i;
+
+    if (count == 0) {
+        printf("No products found!\n");
+        return;
+    }
+
+    printf("\n--------------------------------------------------------------\n");
+    printf("%-6s %-24s %10s %6s %s\n", "ID", "Name", "Price", "Qty", "Status");
+    printf("--------------------------------------------------------------\n");
+    for (i = 0; i < count; i++) {
+        printf("%-6d %-24s %10.2f %6d %s\n",
+               list[i].id, list[i].name, list[i].price, list[i].quantity,
+               list[i].quantity < LOW_STOCK_LIMIT ? "LOW STOCK" : "OK");
+    }
+    printf("--------------------------------------------------------------\n");
+    printf("Total products: %d\n", count);
+}
+
+// makes a lowercase copy so the name search ignores capital letters
+static void toLowerCopy(const char *src, char *dest)
+{
+    while (*src != '\0') {
+        *dest = (char)tolower((unsigned char)*src);
+        src++;
+        dest++;
+    }
+    *dest = '\0';
+}
+
+void searchProduct(struct Product *list, int count)
+{
+    int choice, id, i, found = 0;
+    char key[50], lowKey[50], lowName[50];
+    struct Product *p;
+
+    if (count == 0) {
+        printf("No products found!\n");
+        return;
+    }
+
+    printf("\nSearch by:\n1. Product ID\n2. Product Name\n");
+    choice = readInt("Enter choice: ");
+
+    if (choice == 1) {
+        id = readInt("Enter Product ID to search: ");
+        p = findProduct(list, count, id);
+        if (p == NULL) {
+            printf("Product with ID %d not found.\n", id);
+        } else {
+            printf("\nProduct Found:\n");
+            printf("ID: %d\nName: %s\nPrice: %.2f\nQuantity: %d\n",
+                   p->id, p->name, p->price, p->quantity);
+        }
+    } else if (choice == 2) {
+        readString("Enter name (or part of it): ", key, sizeof(key));
+        toLowerCopy(key, lowKey);
+        for (i = 0; i < count; i++) {
+            toLowerCopy(list[i].name, lowName);
+            if (strstr(lowName, lowKey) != NULL) {
+                if (!found)
+                    printf("\n%-6s %-24s %10s %6s\n", "ID", "Name", "Price", "Qty");
+                printf("%-6d %-24s %10.2f %6d\n",
+                       list[i].id, list[i].name, list[i].price, list[i].quantity);
+                found = 1;
+            }
+        }
+        if (!found)
+            printf("No product matches \"%s\".\n", key);
+    } else {
+        printf("Invalid choice!\n");
+    }
+}
+
+void updateProduct(struct Product *list, int count)
+{
+    int id, choice, extra;
+    float newPrice;
+    struct Product *p;
+
+    if (count == 0) {
+        printf("No products to update!\n");
+        return;
+    }
+
+    id = readInt("Enter Product ID to update: ");
+    p = findProduct(list, count, id);
+    if (p == NULL) {
+        printf("Product with ID %d not found.\n", id);
+        return;
+    }
+
+    printf("Selected: %s (Price %.2f, Qty %d)\n", p->name, p->price, p->quantity);
+    printf("1. Change price\n2. Add stock (restock)\n");
+    choice = readInt("Enter choice: ");
+
+    if (choice == 1) {
+        newPrice = readFloat("Enter new price: ");
+        if (newPrice < 0) {
+            printf("Price cannot be negative.\n");
+            return;
+        }
+        p->price = newPrice;
+        saveProducts(list, count);
+        printf("Price updated successfully!\n");
+    } else if (choice == 2) {
+        extra = readInt("Enter quantity to add: ");
+        if (extra <= 0) {
+            printf("Quantity must be positive.\n");
+            return;
+        }
+        p->quantity += extra;
+        saveProducts(list, count);
+        printf("Stock updated! New quantity: %d\n", p->quantity);
+    } else {
+        printf("Invalid choice!\n");
+    }
+}
+
+void deleteProduct(struct Product *list, int *count)
+{
+    int id, i, pos = -1;
+    char sure[10];
+
+    if (*count == 0) {
+        printf("No products to delete!\n");
+        return;
+    }
+
+    id = readInt("Enter Product ID to delete: ");
+    for (i = 0; i < *count; i++) {
+        if (list[i].id == id) {
+            pos = i;
+            break;
+        }
+    }
+    if (pos == -1) {
+        printf("Product with ID %d not found.\n", id);
+        return;
+    }
+
+    printf("Delete \"%s\"? ", list[pos].name);
+    readString("(y/n): ", sure, sizeof(sure));
+    if (sure[0] != 'y' && sure[0] != 'Y') {
+        printf("Delete cancelled.\n");
+        return;
+    }
+
+    // move everything after it one place back
+    for (i = pos; i < *count - 1; i++)
+        list[i] = list[i + 1];
+    (*count)--;
+
+    saveProducts(list, *count);
+    printf("Product deleted successfully!\n");
+}
+
+void lowStockAlert(struct Product *list, int count)
+{
+    int i, found = 0;
+
+    for (i = 0; i < count; i++) {
+        if (list[i].quantity < LOW_STOCK_LIMIT) {
+            if (!found) {
+                printf("\n*** LOW STOCK WARNING (below %d units) ***\n",
+                       LOW_STOCK_LIMIT);
+                printf("%-6s %-24s %6s\n", "ID", "Name", "Qty");
+            }
+            found = 1;
+            printf("%-6d %-24s %6d\n", list[i].id, list[i].name, list[i].quantity);
+        }
+    }
+    if (!found)
+        printf("Stock levels are fine. No low stock items.\n");
+}
+
+
+/* ---------- loyalty customers ---------- */
+
+struct Customer *findCustomer(struct Customer *list, int count, int id)
+{
+    struct Customer *c;
+
+    for (c = list; c < list + count; c++)
+        if (c->id == id)
+            return c;
+    return NULL;
+}
+
+void addCustomer(struct Customer **list, int *count)
+{
+    struct Customer c, *bigger;
+    int i, maxId = 1000;
+
+    // new ID is one more than the biggest ID so far (IDs start from 1001)
+    for (i = 0; i < *count; i++)
+        if ((*list)[i].id > maxId)
+            maxId = (*list)[i].id;
+    c.id = maxId + 1;
+
+    readString("Enter customer name: ", c.name, sizeof(c.name));
+    if (strlen(c.name) == 0) {
+        printf("Name cannot be empty.\n");
+        return;
+    }
+    c.totalSpent = 0;
+
+    bigger = (struct Customer *)realloc(*list,
+                 (*count + 1) * sizeof(struct Customer));
+    if (bigger == NULL) {
+        printf("Not enough memory!\n");
+        return;
+    }
+    *list = bigger;
+    (*list)[*count] = c;
+    (*count)++;
+
+    saveCustomers(*list, *count);
+    printf("Customer registered. Loyalty ID = %d (%.0f%% discount at checkout)\n",
+           c.id, DISCOUNT_RATE * 100);
+}
+
+void displayCustomers(struct Customer *list, int count)
+{
+    int i;
+
+    if (count == 0) {
+        printf("No loyalty customers registered yet.\n");
+        return;
+    }
+
+    printf("\n%-10s %-24s %12s\n", "Loyalty ID", "Name", "Total Spent");
+    printf("------------------------------------------------\n");
+    for (i = 0; i < count; i++)
+        printf("%-10d %-24s %12.2f\n",
+               list[i].id, list[i].name, list[i].totalSpent);
+}
+
+
+/* ---------- billing ---------- */
+
+// bill number = number of sales saved so far + 1
+static int countBills(void)
+{
+    FILE *fp = fopen(SALES_FILE, "r");
+    char line[200];
+    int n = 0;
+
+    if (fp == NULL)
+        return 0;
+    while (fgets(line, sizeof(line), fp) != NULL)
+        n++;
+    fclose(fp);
+    return n;
+}
+
+// prints the receipt to the screen (stdout) or to receipts.txt
+static void printReceipt(FILE *out, struct Product *products, int pcount,
+                         int *ids, int *qtys, int n, struct Customer *c,
+                         int billNo, const char *dateStr, const char *timeStr,
+                         float subtotal, float discount, float total)
+{
+    int i;
+    struct Product *p;
+
+    fprintf(out, "\n==========================================\n");
+    fprintf(out, "       SUPERMARKET - BILL RECEIPT\n");
+    fprintf(out, "==========================================\n");
+    fprintf(out, "Bill No: %d   %s %s\n", billNo, dateStr, timeStr);
+    if (c != NULL)
+        fprintf(out, "Customer: %s (Loyalty ID %d)\n", c->name, c->id);
+    fprintf(out, "------------------------------------------\n");
+    fprintf(out, "%-18s %5s %8s %9s\n", "Item", "Qty", "Price", "Amount");
+    fprintf(out, "------------------------------------------\n");
+    for (i = 0; i < n; i++) {
+        p = findProduct(products, pcount, ids[i]);
+        fprintf(out, "%-18.18s %5d %8.2f %9.2f\n",
+                p->name, qtys[i], p->price, p->price * qtys[i]);
+    }
+    fprintf(out, "------------------------------------------\n");
+    fprintf(out, "%-33s %9.2f\n", "Subtotal:", subtotal);
+    if (c != NULL)
+        fprintf(out, "%-33s %9.2f\n", "Loyalty Discount (5%):", -discount);
+    fprintf(out, "%-33s %9.2f\n", "TOTAL:", total);
+    fprintf(out, "==========================================\n");
+    fprintf(out, "        Thank you for shopping!\n");
+}
+
+void billing(struct Product *products, int pcount,
+             struct Customer *customers, int ccount)
+{
+    int *ids, *qtys;            // the cart: product IDs and their quantities
+    int cap = 4, n = 0;
+    int i, j, id, qty, inCart, loyaltyId, billNo;
+    float subtotal = 0, discount = 0, total;
+    struct Product *p;
+    struct Customer *c = NULL;
+    char dateStr[20], timeStr[20];
+    time_t now;
+    FILE *fp;
+
+    if (pcount == 0) {
+        printf("No products available to buy!\n");
+        return;
+    }
+
+    ids = (int *)malloc(cap * sizeof(int));
+    qtys = (int *)malloc(cap * sizeof(int));
+    if (ids == NULL || qtys == NULL) {
+        printf("Not enough memory!\n");
+        free(ids);
+        free(qtys);
+        return;
+    }
+
+    printf("\n--- NEW BILL --- (enter Product ID 0 to finish)\n");
+
+    while (1) {
+        id = readInt("\nEnter Product ID: ");
+        if (id == 0)
+            break;
+
+        p = findProduct(products, pcount, id);
+        if (p == NULL) {
+            printf("Invalid! Product ID %d does not exist.\n", id);
+            continue;
+        }
+        printf("%s - Price %.2f - In stock %d\n", p->name, p->price, p->quantity);
+
+        qty = readInt("Enter Quantity: ");
+        if (qty <= 0) {
+            printf("Quantity must be positive.\n");
+            continue;
+        }
+
+        // check if this item is already in the cart
+        inCart = 0;
+        j = -1;
+        for (i = 0; i < n; i++) {
+            if (ids[i] == id) {
+                inCart = qtys[i];
+                j = i;
+            }
+        }
+
+        if (qty + inCart > p->quantity) {
+            printf("Error: Only %d items available in stock!\n",
+                   p->quantity - inCart);
+            continue;
+        }
+
+        if (j >= 0) {
+            qtys[j] += qty;
+        } else {
+            if (n == cap) {
+                // cart is full, double its size
+                int *t1, *t2;
+                cap *= 2;
+                t1 = (int *)realloc(ids, cap * sizeof(int));
+                t2 = (int *)realloc(qtys, cap * sizeof(int));
+                if (t1 == NULL || t2 == NULL) {
+                    printf("Not enough memory!\n");
+                    if (t1 != NULL) ids = t1;
+                    if (t2 != NULL) qtys = t2;
+                    break;
+                }
+                ids = t1;
+                qtys = t2;
+            }
+            ids[n] = id;
+            qtys[n] = qty;
+            n++;
+        }
+        printf("Added to bill.\n");
+    }
+
+    if (n == 0) {
+        printf("Nothing purchased. Bill cancelled.\n");
+        free(ids);
+        free(qtys);
+        return;
+    }
+
+    for (i = 0; i < n; i++) {
+        p = findProduct(products, pcount, ids[i]);
+        subtotal += p->price * qtys[i];
+    }
+
+    loyaltyId = readInt("Loyalty ID (0 if none): ");
+    if (loyaltyId != 0) {
+        c = findCustomer(customers, ccount, loyaltyId);
+        if (c == NULL)
+            printf("Loyalty ID not found. No discount applied.\n");
+        else
+            discount = subtotal * DISCOUNT_RATE;
+    }
+    total = subtotal - discount;
+
+    now = time(NULL);
+    strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", localtime(&now));
+    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", localtime(&now));
+    billNo = countBills() + 1;
+
+    printReceipt(stdout, products, pcount, ids, qtys, n, c,
+                 billNo, dateStr, timeStr, subtotal, discount, total);
+
+    // save a copy of the receipt too
+    fp = fopen(RECEIPT_FILE, "a");
+    if (fp != NULL) {
+        printReceipt(fp, products, pcount, ids, qtys, n, c,
+                     billNo, dateStr, timeStr, subtotal, discount, total);
+        fclose(fp);
+    }
+
+    // take the sold items out of stock
+    for (i = 0; i < n; i++) {
+        p = findProduct(products, pcount, ids[i]);
+        p->quantity -= qtys[i];
+    }
+    saveProducts(products, pcount);
+
+    if (c != NULL) {
+        c->totalSpent += total;
+        saveCustomers(customers, ccount);
+    }
+
+    // add this sale to sales.txt
+    fp = fopen(SALES_FILE, "a");
+    if (fp != NULL) {
+        fprintf(fp, "%s|%d|%d|%.2f|%.2f|%.2f\n",
+                dateStr, billNo, c != NULL ? c->id : 0,
+                subtotal, discount, total);
+        fclose(fp);
+    } else {
+        printf("Warning: could not save sale record!\n");
+    }
+
+    // tell the user if something they just sold is running low
+    for (i = 0; i < n; i++) {
+        p = findProduct(products, pcount, ids[i]);
+        if (p->quantity < LOW_STOCK_LIMIT)
+            printf("Warning: %s is low on stock (%d left)\n", p->name, p->quantity);
+    }
+
+    free(ids);
+    free(qtys);
+}
+
+
+/* ---------- sales summary ---------- */
+
+void salesSummary(void)
+{
+    FILE *fp = fopen(SALES_FILE, "r");
+    char line[200], wanted[20], date[20], today[20];
+    int billNo, loyalty, bills = 0;
+    float sub, disc, tot, revenue = 0, discounts = 0;
+    time_t now = time(NULL);
+
+    if (fp == NULL) {
+        printf("No sales recorded yet.\n");
+        return;
+    }
+
+    strftime(today, sizeof(today), "%Y-%m-%d", localtime(&now));
+    readString("Enter date (YYYY-MM-DD) or press Enter for today: ",
+               wanted, sizeof(wanted));
+    if (strlen(wanted) == 0)
+        strcpy(wanted, today);
+
+    printf("\n--- Sales on %s ---\n", wanted);
+    printf("%-8s %-10s %10s %10s %10s\n",
+           "Bill No", "Loyalty", "Subtotal", "Discount", "Total");
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%10[^|]|%d|%d|%f|%f|%f",
+                   date, &billNo, &loyalty, &sub, &disc, &tot) == 6) {
+            if (strcmp(date, wanted) == 0) {
+                printf("%-8d %-10d %10.2f %10.2f %10.2f\n",
+                       billNo, loyalty, sub, disc, tot);
+                revenue += tot;
+                discounts += disc;
+                bills++;
+            }
+        }
+    }
+    fclose(fp);
+
+    if (bills == 0) {
+        printf("No sales found for this date.\n");
+        return;
+    }
+
+    printf("------------------------------------------------------\n");
+    printf("Number of bills : %d\n", bills);
+    printf("Discounts given : %.2f\n", discounts);
+    printf("TOTAL SALES     : %.2f\n", revenue);
+}
